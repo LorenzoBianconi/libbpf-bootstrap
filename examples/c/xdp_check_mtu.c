@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (C) 2017 Cavium, Inc.
+/*
+ * This program implements a pMTU discovery responder in eBPF.
+ * The idea is to replace the OVN check_packet_length action creating a
+ * lpm_trie map in order to associate network addresses to specific MTUs.
+ * E.g:
+ *
+ * $./xdp_check_mtu eth0 192.168.0.0/24:100 192.168.1.0/24:101 \
+ *			 192.168.2.0/24:102
+ *
+ * xdp_check_mtu will send an ICMP error msg (need to frag) if the destination
+ * belongs to a given IP network and the packet size is greater than the
+ * specified one (MTU + 14).
  */
 #include <linux/bpf.h>
 #include <linux/if_link.h>
@@ -29,8 +40,15 @@ static struct env {
 	long min_duration_ms;
 } env;
 
+/* Key for IPv4 lpm_trie lookup */
+struct lpm_key4 {
+	struct bpf_lpm_trie_key trie_key;
+	__u8 data[4];
+};
+
 struct ip_mtu_pair {
 	__be32 dst;
+	__u32 plen;
 	__u32 mtu;
 };
 static struct ip_mtu_pair *ip_mtu_list;
@@ -69,7 +87,7 @@ static void bump_memlock_rlimit(void)
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-		"%s: %s [-Shd] <interface> <IP0:mtu0> <IP1:mtu1>..\n"
+		"%s: %s [-Shd] <interface> <IP0/NM0:mtu0> <IP1/NM1:mtu1>..\n"
 		"OPTS:\n"
 		"    -S    use skb-mode\n",
 		__func__, prog);
@@ -89,14 +107,18 @@ static int parse_ip_mtu_pair(char **pair, int n_pair)
 		int j = 0;
 
 		for (t0 = strtok_r(pair[i], ":", &r0); t0;
-		     t0 = strtok_r(NULL, " ", &r0)) {
+		     t0 = strtok_r(NULL, ":", &r0)) {
 			if (!j) {
 				__u32 addr;
+				int plen;
 
-				if (!inet_pton(AF_INET, t0, &addr))
+				plen = inet_net_pton(AF_INET, t0, &addr,
+						     sizeof(__u32));
+				if (plen < 0)
 					return 1;
 
 				ip_mtu_list[i].dst = addr;
+				ip_mtu_list[i].plen = plen;
 				j++;
 			} else {
 				long int mtu = strtol(t0, NULL, 10);
@@ -180,9 +202,16 @@ int main(int argc, char **argv)
 	}
 
 	for (i = 0; i < argc - 1 - optind; i++) {
-		if (bpf_map_update_elem(bpf_map__fd(skel->maps.mtu_ipv4_match),
-					&ip_mtu_list[i].dst,
-					&ip_mtu_list[i].mtu, 0) < 0) {
+		struct lpm_key4 key = {
+			.trie_key.prefixlen = ip_mtu_list[i].plen,
+			.data[0] = ip_mtu_list[i].dst & 0xff,
+			.data[1] = (ip_mtu_list[i].dst >> 8) & 0xff,
+			.data[2] = (ip_mtu_list[i].dst >> 16) & 0xff,
+			.data[3] = (ip_mtu_list[i].dst >> 24) & 0xff,
+		};
+
+		if (bpf_map_update_elem(bpf_map__fd(skel->maps.lpm4_map),
+					&key, &ip_mtu_list[i].mtu, 0) < 0) {
 			fprintf(stderr, "Failed to update BPF map\n");
 			err = -1;
 			goto out_unlink;
