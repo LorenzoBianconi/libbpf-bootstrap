@@ -11,6 +11,8 @@
 #define LR_DEV_IP	"::ffff:192.168.10.25"
 #define OR_DEV_IP	"::ffff:192.168.10.26"
 
+#define PORT		8888
+
 static volatile sig_atomic_t exiting = 0;
 
 static void sig_int(int signo)
@@ -27,17 +29,80 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
 static int make_sockaddr(int family, const char *addr_str, __u16 port,
 			 struct sockaddr_storage *addr, socklen_t *len)
 {
-	struct sockaddr_in6 *sin6 = (void *)addr;
+	if (family == AF_INET) {
+		struct sockaddr_in *sin = (void *)addr;
 
-	memset(addr, 0, sizeof(*sin6));
-	sin6->sin6_family = AF_INET6;
-	sin6->sin6_port = htons(port);
-	if (addr_str &&
-	    inet_pton(AF_INET6, addr_str, &sin6->sin6_addr) != 1)
+		memset(addr, 0, sizeof(*sin));
+		sin->sin_family = AF_INET;
+		sin->sin_port = htons(port);
+		if (addr_str &&
+		    inet_pton(AF_INET, addr_str, &sin->sin_addr) != 1)
+			return -1;
+		if (len)
+			*len = sizeof(*sin);
+		return 0;
+	} else if (family == AF_INET6) {
+		struct sockaddr_in6 *sin6 = (void *)addr;
+
+		memset(addr, 0, sizeof(*sin6));
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_port = htons(port);
+		if (addr_str &&
+		    inet_pton(AF_INET6, addr_str, &sin6->sin6_addr) != 1)
+			return -1;
+		if (len)
+			*len = sizeof(*sin6);
+		return 0;
+	}
+	return -1;
+}
+
+#define save_errno_close(fd) ({ int __save = errno; close(fd); errno = __save; })
+static int start_server(int family, int type, const char *addr_str,
+			__u16 port, int timeout_ms)
+{
+	struct timeval timeout = { .tv_sec = 3 };
+	struct sockaddr_storage addr;
+	struct sockaddr *sa = (struct sockaddr *)&addr;
+	socklen_t addrlen;
+	int on = 1, fd;
+
+	if (make_sockaddr(family, addr_str, port, &addr, &addrlen))
 		return -1;
-	if (len)
-		*len = sizeof(*sin6);
-	return 0;
+
+	fd = socket(sa->sa_family, type, 0);
+	if (fd < 0)
+		return -1;
+
+	if (timeout_ms > 0) {
+		timeout.tv_sec = timeout_ms / 1000;
+		timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	}
+
+	if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+		       sizeof(timeout)))
+		return -1;
+
+	if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+		       sizeof(timeout)))
+		return -1;
+
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on)))
+		return -1;
+
+	if (bind(fd, sa, addrlen) < 0)
+		goto error_close;
+
+	if (type == SOCK_STREAM) {
+		if (listen(fd, 1) < 0)
+			goto error_close;
+	}
+
+	return fd;
+
+error_close:
+	save_errno_close(fd);
+	return -1;
 }
 
 int main(int argc, char **argv)
@@ -50,7 +115,7 @@ int main(int argc, char **argv)
 	struct sockaddr_storage or_sa;
 	bool hook_created = false;
 	struct blink_tc_bpf *skel;
-	int ifindex, err;
+	int ifindex, err, sock;
 
 	ifindex = if_nametoindex(DEV_NAME);
 	if (!ifindex) {
@@ -65,6 +130,12 @@ int main(int argc, char **argv)
 
 	if (make_sockaddr(AF_INET6, OR_DEV_IP, 0, &or_sa, NULL)) {
 		fprintf(stderr, "Invalid LR address %s\n", OR_DEV_IP);
+		return 1;
+	}
+
+	sock = start_server(AF_INET, SOCK_STREAM, NULL, PORT, 0);
+	if (sock < 0) {
+		fprintf(stderr, "Failed to start server\n");
 		return 1;
 	}
 
@@ -116,8 +187,32 @@ int main(int argc, char **argv)
 	}
 
 	while (!exiting) {
-		fprintf(stderr, ".");
-		sleep(1);
+		struct sockaddr_storage client_addr;
+		socklen_t client_addrlen;
+		int client_sockfd;
+		char buf[16] = {};
+		size_t len;
+
+		client_sockfd = accept(sock, (struct sockaddr *)&client_addr,
+				       &client_addrlen);
+		if (client_sockfd < 0)
+			continue;
+
+		len = recv(client_sockfd, buf, sizeof(buf), 0);
+		if (len <= 0)
+			continue;
+
+		if (strstr(buf, "accept")) {
+			skel->data->drop = false;
+		} else if (strstr(buf, "drop")) {
+			skel->data->drop = true;
+		} else if (strstr(buf, "get")) {
+			memset(buf, 0, sizeof(buf));
+			sprintf(buf, "%d\n", skel->data->drop);
+			send(client_sockfd, buf, strlen(buf), 0);
+		}
+
+		close(client_sockfd);
 	}
 
 	tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
@@ -131,6 +226,7 @@ cleanup:
 	if (hook_created)
 		bpf_tc_hook_destroy(&tc_hook);
 	blink_tc_bpf__destroy(skel);
+	close(sock);
 
 	return -err;
 }
