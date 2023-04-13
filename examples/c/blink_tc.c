@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
 
 #include "blink_tc.skel.h"
 
@@ -116,6 +117,7 @@ int main(int argc, char **argv)
 	bool hook_created = false;
 	struct blink_tc_bpf *skel;
 	int ifindex, err, sock;
+	pid_t pid, sid;
 
 	ifindex = if_nametoindex(DEV_NAME);
 	if (!ifindex) {
@@ -132,6 +134,24 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Invalid LR address %s\n", OR_DEV_IP);
 		return 1;
 	}
+
+	pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "fork syscall failed\n");
+		return 1;
+	}
+
+	if (pid > 0) /* parent process */
+		return 0;
+
+	umask(0);
+	sid = setsid();
+	if (sid < 0) {
+		fprintf(stderr, "setsid syscall failed\n");
+		return 1;
+	}
+
+	chdir("/");
 
 	sock = start_server(AF_INET, SOCK_STREAM, NULL, PORT, 0);
 	if (sock < 0) {
@@ -186,6 +206,11 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	/* close std descriptors */
+	close(STDIN_FILENO);
+	close(STDOUT_FILENO);
+	close(STDERR_FILENO);
+
 	while (!exiting) {
 		struct sockaddr_storage client_addr;
 		socklen_t client_addrlen;
@@ -217,11 +242,6 @@ int main(int argc, char **argv)
 
 	tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
 	err = bpf_tc_detach(&tc_hook, &tc_opts);
-	if (err) {
-		fprintf(stderr, "Failed to detach TC: %d\n", err);
-		goto cleanup;
-	}
-
 cleanup:
 	if (hook_created)
 		bpf_tc_hook_destroy(&tc_hook);
