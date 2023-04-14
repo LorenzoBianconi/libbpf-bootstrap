@@ -5,6 +5,7 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "blink_tc.skel.h"
 
@@ -13,11 +14,27 @@
 #define OR_DEV_IP	"::ffff:192.168.10.26"
 
 #define PORT		8888
+#define WORKING_DIR	"/home/lorenzo/workspace/blink_tc"
+#define LOG_FILE	"/home/lorenzo/workspace/blink_tc/blink_tc.log"
 
 static volatile sig_atomic_t exiting = 0;
+static FILE *log_fd;
+
+static void log_to_file(const char *data)
+{
+	time_t t = time(NULL);
+	struct tm *tm = localtime(&t);
+	char s[256] = {}, ts[64];
+
+	strftime(ts, sizeof(ts), "%c", tm);
+	sprintf(s, "%s:\t%s\n", ts, data);
+	fprintf(log_fd, s);
+	fflush(log_fd);
+}
 
 static void sig_int(int signo)
 {
+	log_to_file("received terminating signal");
 	exiting = 1;
 }
 
@@ -38,7 +55,7 @@ static int make_sockaddr(int family, const char *addr_str, __u16 port,
 		sin->sin_port = htons(port);
 		if (addr_str &&
 		    inet_pton(AF_INET, addr_str, &sin->sin_addr) != 1)
-			return -1;
+			return -EINVAL;
 		if (len)
 			*len = sizeof(*sin);
 		return 0;
@@ -50,12 +67,13 @@ static int make_sockaddr(int family, const char *addr_str, __u16 port,
 		sin6->sin6_port = htons(port);
 		if (addr_str &&
 		    inet_pton(AF_INET6, addr_str, &sin6->sin6_addr) != 1)
-			return -1;
+			return -EINVAL;
 		if (len)
 			*len = sizeof(*sin6);
 		return 0;
 	}
-	return -1;
+
+	return -EINVAL;
 }
 
 #define save_errno_close(fd) ({ int __save = errno; close(fd); errno = __save; })
@@ -69,11 +87,11 @@ static int start_server(int family, int type, const char *addr_str,
 	int on = 1, fd;
 
 	if (make_sockaddr(family, addr_str, port, &addr, &addrlen))
-		return -1;
+		return -EINVAL;
 
 	fd = socket(sa->sa_family, type, 0);
 	if (fd < 0)
-		return -1;
+		return -EINVAL;
 
 	if (timeout_ms > 0) {
 		timeout.tv_sec = timeout_ms / 1000;
@@ -82,14 +100,14 @@ static int start_server(int family, int type, const char *addr_str,
 
 	if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
 		       sizeof(timeout)))
-		return -1;
+		return -EINVAL;
 
 	if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
 		       sizeof(timeout)))
-		return -1;
+		return -EINVAL;
 
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on)))
-		return -1;
+		return -EINVAL;
 
 	if (bind(fd, sa, addrlen) < 0)
 		goto error_close;
@@ -103,7 +121,7 @@ static int start_server(int family, int type, const char *addr_str,
 
 error_close:
 	save_errno_close(fd);
-	return -1;
+	return -EINVAL;
 }
 
 int main(int argc, char **argv)
@@ -117,46 +135,46 @@ int main(int argc, char **argv)
 	bool hook_created = false;
 	struct blink_tc_bpf *skel;
 	int ifindex, err, sock;
+	char buf[256] = {};
 	pid_t pid, sid;
-
-	ifindex = if_nametoindex(DEV_NAME);
-	if (!ifindex) {
-		fprintf(stderr, "Failed to find ifindex for %s\n", DEV_NAME);
-		return 1;
-	}
-
-	if (make_sockaddr(AF_INET6, LR_DEV_IP, 0, &lr_sa, NULL)) {
-		fprintf(stderr, "Invalid LR address %s\n", LR_DEV_IP);
-		return 1;
-	}
-
-	if (make_sockaddr(AF_INET6, OR_DEV_IP, 0, &or_sa, NULL)) {
-		fprintf(stderr, "Invalid LR address %s\n", OR_DEV_IP);
-		return 1;
-	}
 
 	pid = fork();
 	if (pid < 0) {
 		fprintf(stderr, "fork syscall failed\n");
-		return 1;
+		exit(EXIT_FAILURE);
 	}
 
 	if (pid > 0) /* parent process */
-		return 0;
+		exit(EXIT_SUCCESS);
 
 	umask(0);
 	sid = setsid();
 	if (sid < 0) {
 		fprintf(stderr, "setsid syscall failed\n");
-		return 1;
+		exit(EXIT_FAILURE);
+	}
+	chdir(WORKING_DIR);
+
+	ifindex = if_nametoindex(DEV_NAME);
+	if (!ifindex) {
+		fprintf(stderr, "Failed to find ifindex for %s\n", DEV_NAME);
+		exit(EXIT_FAILURE);
 	}
 
-	chdir("/");
+	if (make_sockaddr(AF_INET6, LR_DEV_IP, 0, &lr_sa, NULL)) {
+		fprintf(stderr, "Invalid LR address %s\n", LR_DEV_IP);
+		exit(EXIT_FAILURE);
+	}
+
+	if (make_sockaddr(AF_INET6, OR_DEV_IP, 0, &or_sa, NULL)) {
+		fprintf(stderr, "Invalid LR address %s\n", OR_DEV_IP);
+		exit(EXIT_FAILURE);
+	}
 
 	sock = start_server(AF_INET, SOCK_STREAM, NULL, PORT, 0);
 	if (sock < 0) {
 		fprintf(stderr, "Failed to start server\n");
-		return 1;
+		exit(EXIT_FAILURE);
 	}
 
 	tc_hook.ifindex = ifindex;
@@ -166,7 +184,7 @@ int main(int argc, char **argv)
 	skel = blink_tc_bpf__open();
 	if (!skel) {
 		fprintf(stderr, "Failed to open BPF skeleton\n");
-		return 1;
+		exit(EXIT_FAILURE);
 	}
 
 	skel->rodata->lr_addr = ((struct sockaddr_in6 *)&lr_sa)->sin6_addr;
@@ -176,6 +194,7 @@ int main(int argc, char **argv)
 	err = blink_tc_bpf__load(skel);
 	if (err) {
 		fprintf(stderr, "Failed to load and verify BPF skeleton\n");
+		exit(EXIT_FAILURE);
 	}
 
 	/* The hook (i.e. qdisc) may already exists because:
@@ -196,7 +215,7 @@ int main(int argc, char **argv)
 	tc_opts.prog_fd = bpf_program__fd(skel->progs.blink_tc_ingress);
 	err = bpf_tc_attach(&tc_hook, &tc_opts);
 	if (err) {
-		fprintf(stderr, "Failed to attach TC: %d\n", err);
+		fprintf(stderr, "Failed to attach TC: %s\n", strerror(errno));
 		goto cleanup;
 	}
 
@@ -206,16 +225,25 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	log_fd = fopen(LOG_FILE, "w");
+	if (!log_fd) {
+		fprintf(stderr, "Failed to open log file\n");
+		exit(EXIT_FAILURE);
+	}
+
 	/* close std descriptors */
 	close(STDIN_FILENO);
 	close(STDOUT_FILENO);
 	close(STDERR_FILENO);
 
+	sprintf(buf, "starting blink server with pid %d", getpid());
+	log_to_file(buf);
+
 	while (!exiting) {
+		char client_addr_str[INET6_ADDRSTRLEN] = {};
 		struct sockaddr_storage client_addr;
 		socklen_t client_addrlen;
 		int client_sockfd;
-		char buf[16] = {};
 		size_t len;
 
 		client_sockfd = accept(sock, (struct sockaddr *)&client_addr,
@@ -223,20 +251,37 @@ int main(int argc, char **argv)
 		if (client_sockfd < 0)
 			continue;
 
+		memset(buf, 0, sizeof(buf));
 		len = recv(client_sockfd, buf, sizeof(buf), 0);
 		if (len <= 0)
 			continue;
 
+		if (client_addr.ss_family == AF_INET) {
+			struct sockaddr_in *sin = (void *)&client_addr;
+
+			inet_ntop(AF_INET, &sin->sin_addr, client_addr_str,
+				  INET_ADDRSTRLEN);
+		} else {
+			struct sockaddr_in6 *sin6 = (void *)&client_addr;
+
+			inet_ntop(AF_INET6, &sin6->sin6_addr, client_addr_str,
+				  INET6_ADDRSTRLEN);
+		}
+
 		if (strstr(buf, "accept")) {
+			sprintf(buf, "received accept cmd from %s",
+				client_addr_str);
+			log_to_file(buf);
 			skel->data->drop = false;
 		} else if (strstr(buf, "drop")) {
+			sprintf(buf, "received drop cmd from %s",
+				client_addr_str);
+			log_to_file(buf);
 			skel->data->drop = true;
 		} else if (strstr(buf, "get")) {
-			memset(buf, 0, sizeof(buf));
 			sprintf(buf, "%d\n", skel->data->drop);
 			send(client_sockfd, buf, strlen(buf), 0);
 		}
-
 		close(client_sockfd);
 	}
 
@@ -246,7 +291,12 @@ cleanup:
 	if (hook_created)
 		bpf_tc_hook_destroy(&tc_hook);
 	blink_tc_bpf__destroy(skel);
+	fclose(log_fd);
 	close(sock);
 
-	return -err;
+	memset(buf, 0, sizeof(buf));
+	sprintf(buf, "stopping blink server with return val %d", -err);
+	log_to_file(buf);
+
+	exit(-err);
 }
