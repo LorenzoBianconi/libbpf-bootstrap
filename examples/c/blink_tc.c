@@ -136,24 +136,6 @@ int main(int argc, char **argv)
 	struct blink_tc_bpf *skel;
 	int ifindex, err, sock;
 	char buf[256] = {};
-	pid_t pid, sid;
-
-	pid = fork();
-	if (pid < 0) {
-		fprintf(stderr, "fork syscall failed\n");
-		exit(EXIT_FAILURE);
-	}
-
-	if (pid > 0) /* parent process */
-		exit(EXIT_SUCCESS);
-
-	umask(0);
-	sid = setsid();
-	if (sid < 0) {
-		fprintf(stderr, "setsid syscall failed\n");
-		exit(EXIT_FAILURE);
-	}
-	chdir(WORKING_DIR);
 
 	ifindex = if_nametoindex(DEV_NAME);
 	if (!ifindex) {
@@ -231,6 +213,8 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
+	umask(0);
+	chdir(WORKING_DIR);
 	/* close std descriptors */
 	close(STDIN_FILENO);
 	close(STDOUT_FILENO);
