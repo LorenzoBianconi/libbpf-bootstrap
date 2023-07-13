@@ -17,6 +17,10 @@
 #define WORKING_DIR	"/home/lorenzo/workspace/blink_tc"
 #define LOG_FILE	"/home/lorenzo/workspace/blink_tc/blink_tc.log"
 
+/* Before running the program, please remember to set required capabilities:
+ * #setcap 'cap_sys_admin=+ep cap_net_admin=+ep cap_sys_resource=+ep' ${DIR}/blink_tc
+ */
+
 static volatile sig_atomic_t exiting = 0;
 static FILE *log_fd;
 static bool command_from_user = false;
