@@ -19,6 +19,7 @@
 
 static volatile sig_atomic_t exiting = 0;
 static FILE *log_fd;
+static bool command_from_user = false;
 
 static void log_to_file(const char *data)
 {
@@ -252,12 +253,28 @@ int main(int argc, char **argv)
 				  INET6_ADDRSTRLEN);
 		}
 
-		if (strstr(buf, "accept")) {
+		if (strstr(buf, "accept_from_user")) {
+			sprintf(buf, "received accept_from_user cmd from %s",
+				client_addr_str);
+			log_to_file(buf);
+			skel->data->drop = false;
+			command_from_user = true;
+		} else if (strstr(buf, "drop_from_user")) {
+			sprintf(buf, "received drop_from_user cmd from %s",
+				client_addr_str);
+			log_to_file(buf);
+			skel->data->drop = true;
+			command_from_user = true;
+		} else if (strstr(buf, "auto_mode")) {
+			sprintf(buf, "received auto_mode cmd from %s",
+				client_addr_str);
+			command_from_user = false;
+		} else if (!command_from_user && strstr(buf, "accept")) {
 			sprintf(buf, "received accept cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
 			skel->data->drop = false;
-		} else if (strstr(buf, "drop")) {
+		} else if (!command_from_user && strstr(buf, "drop")) {
 			sprintf(buf, "received drop cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
