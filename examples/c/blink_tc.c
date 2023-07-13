@@ -273,6 +273,7 @@ int main(int argc, char **argv)
 		} else if (strstr(buf, "auto_mode")) {
 			sprintf(buf, "received auto_mode cmd from %s",
 				client_addr_str);
+			log_to_file(buf);
 			command_from_user = false;
 		} else if (!command_from_user && strstr(buf, "accept")) {
 			sprintf(buf, "received accept cmd from %s",
