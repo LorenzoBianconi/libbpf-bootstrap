@@ -23,7 +23,7 @@
 
 static volatile sig_atomic_t exiting = 0;
 static FILE *log_fd;
-static bool command_from_user = false;
+static bool rx_command_enabled = true;
 
 static void log_to_file(const char *data)
 {
@@ -258,29 +258,22 @@ int main(int argc, char **argv)
 				  INET6_ADDRSTRLEN);
 		}
 
-		if (strstr(buf, "accept_from_user")) {
-			sprintf(buf, "received accept_from_user cmd from %s",
+		if (strstr(buf, "rx_enabled")) {
+			sprintf(buf, "received rx_enabled cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
-			skel->data->drop = false;
-			command_from_user = true;
-		} else if (strstr(buf, "drop_from_user")) {
-			sprintf(buf, "received drop_from_user cmd from %s",
+			rx_command_enabled = true;
+		} else if (strstr(buf, "rx_disabled")) {
+			sprintf(buf, "received rx_disabled cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
-			skel->data->drop = true;
-			command_from_user = true;
-		} else if (strstr(buf, "auto_mode")) {
-			sprintf(buf, "received auto_mode cmd from %s",
-				client_addr_str);
-			log_to_file(buf);
-			command_from_user = false;
-		} else if (!command_from_user && strstr(buf, "accept")) {
+			rx_command_enabled = false;
+		} else if (!rx_command_enabled && strstr(buf, "accept")) {
 			sprintf(buf, "received accept cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
 			skel->data->drop = false;
-		} else if (!command_from_user && strstr(buf, "drop")) {
+		} else if (!rx_command_enabled && strstr(buf, "drop")) {
 			sprintf(buf, "received drop cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
