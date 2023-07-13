@@ -268,12 +268,12 @@ int main(int argc, char **argv)
 				client_addr_str);
 			log_to_file(buf);
 			rx_command_enabled = false;
-		} else if (!rx_command_enabled && strstr(buf, "accept")) {
+		} else if (rx_command_enabled && strstr(buf, "accept")) {
 			sprintf(buf, "received accept cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
 			skel->data->drop = false;
-		} else if (!rx_command_enabled && strstr(buf, "drop")) {
+		} else if (rx_command_enabled && strstr(buf, "drop")) {
 			sprintf(buf, "received drop cmd from %s",
 				client_addr_str);
 			log_to_file(buf);
