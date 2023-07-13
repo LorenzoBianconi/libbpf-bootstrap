@@ -202,7 +202,8 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	if (signal(SIGINT, sig_int) == SIG_ERR) {
+	if (signal(SIGINT, sig_int) == SIG_ERR ||
+	    signal(SIGTERM, sig_int) == SIG_ERR) {
 		err = errno;
 		fprintf(stderr, "Can't set signal handler: %s\n", strerror(errno));
 		goto cleanup;
