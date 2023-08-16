@@ -7,6 +7,8 @@
 #define TC_ACT_OK	0
 #define TC_ACT_SHOT	2
 
+#define ETH_P_8021Q	0x8100
+#define ETH_P_8021AD	0x88a8
 #define ETH_P_IP	0x0800		/* Internet Protocol packet	*/
 #define ETH_P_IPV6	0x86dd
 
@@ -35,6 +37,7 @@ int blink_tc_ingress(struct __sk_buff *skb)
 	void *data_end = (void *)(__u64)skb->data_end;
 	void *data = (void *)(__u64)skb->data;
 	struct ethhdr *eh = data;
+	__u64 nh_off = sizeof(*eh);
 	struct ipv6hdr *ih6;
 	__u32 *val, key = 0;
 
@@ -48,8 +51,17 @@ int blink_tc_ingress(struct __sk_buff *skb)
 	if (eh + 1 > (struct ethhdr *)data_end)
 		return TC_ACT_SHOT;
 
+	/* Handle VLAN tagged packet */
+	if (eh->h_proto == bpf_htons(ETH_P_8021Q) ||
+	    eh->h_proto == bpf_htons(ETH_P_8021AD)) {
+		nh_off += sizeof(struct vlan_hdr);
+
+		if (data + nh_off > data_end)
+			return TC_ACT_SHOT;
+	}
+
 	if (skb->protocol == bpf_htons(ETH_P_IP)) {
-		struct iphdr *ih = (struct iphdr *)(eh + 1);
+		struct iphdr *ih = (struct iphdr *)(data + nh_off);
 
 		if (ih + 1 > (struct iphdr *)data_end)
 			return TC_ACT_SHOT;
@@ -61,7 +73,7 @@ int blink_tc_ingress(struct __sk_buff *skb)
 		goto out;
 	}
 
-	ih6 = (struct ipv6hdr *)(eh + 1);
+	ih6 = (struct ipv6hdr *)(data + nh_off);
 	if (ih6 + 1 > (struct ipv6hdr *)data_end)
 		return TC_ACT_SHOT;
 
