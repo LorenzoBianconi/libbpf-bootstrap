@@ -163,4 +163,10 @@ int xdp_check_mtu(struct xdp_md *xdp)
 	return ret;
 }
 
+SEC("xdp.frags")
+int xdp_dummy(struct xdp_md *xdp)
+{
+	return XDP_PASS;
+}
+
 char _license[] SEC("license") = "GPL";
