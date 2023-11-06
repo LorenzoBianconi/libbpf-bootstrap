@@ -22,21 +22,8 @@
 #define ICMP_DEST_UNREACH		3
 #define ICMP_FRAG_NEEDED		4
 
-/* Key for IPv4 lpm_trie lookup */
-struct lpm_key4 {
-	struct bpf_lpm_trie_key trie_key;
-	__u8 data[4];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
-	__type(key, struct lpm_key4);
-	__type(value, u32);
-	__uint(max_entries, 64);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} lpm4_map SEC(".maps");
-
 int debug = 0;
+int mtu = 0;
 
 static __always_inline __u16 csum_fold_helper(__u32 csum)
 {
@@ -119,10 +106,9 @@ int xdp_check_mtu(struct xdp_md *xdp)
 	void *data = (void *)(long)xdp->data;
 	int len = data_end - data;
 	struct ethhdr *eth = data;
-	struct lpm_key4 key4;
 	int ret = XDP_PASS;
 	struct iphdr *iph;
-	u32 *mtu, size;
+	u32 size;
 
 	if (data + sizeof(*eth) > data_end)
 		return XDP_DROP;
@@ -134,17 +120,7 @@ int xdp_check_mtu(struct xdp_md *xdp)
 	if ((void *)(iph + 1) > data_end)
 		return XDP_DROP;
 
-	key4.trie_key.prefixlen = 32;		/* netmask */
-	key4.data[0] = iph->daddr & 0xff;	/* dst IP */
-	key4.data[1] = (iph->daddr >> 8) & 0xff;
-	key4.data[2] = (iph->daddr >> 16) & 0xff;
-	key4.data[3] = (iph->daddr >> 24) & 0xff;
-
-	mtu = bpf_map_lookup_elem(&lpm4_map, &key4);
-	if (!mtu)
-		return XDP_PASS;
-
-	size = sizeof(*eth) + *mtu;
+	size = sizeof(*eth) + mtu;
 	if (size < ICMP_TOOBIG_SIZE)
 		size = ICMP_TOOBIG_SIZE;
 

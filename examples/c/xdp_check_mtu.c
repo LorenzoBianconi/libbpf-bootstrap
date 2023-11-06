@@ -40,19 +40,6 @@ static struct env {
 	long min_duration_ms;
 } env;
 
-/* Key for IPv4 lpm_trie lookup */
-struct lpm_key4 {
-	struct bpf_lpm_trie_key trie_key;
-	__u8 data[4];
-};
-
-struct ip_mtu_pair {
-	__be32 dst;
-	__u32 plen;
-	__u32 mtu;
-};
-static struct ip_mtu_pair *ip_mtu_list;
-
 static int flags = XDP_FLAGS_UPDATE_IF_NOEXIST;
 static int if_index;
 
@@ -87,62 +74,20 @@ static void bump_memlock_rlimit(void)
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-		"%s: %s [-Shd] -P <peer-interface> -D <interface> <IP0/NM0:mtu0> <IP1/NM1:mtu1>..\n"
+		"%s: %s [-Shd] -M <mtu> -D <interface>\n"
 		"OPTS:\n"
 		"    -S    use skb-mode\n",
 		__func__, prog);
 }
 
-static int parse_ip_mtu_pair(char **pair, int n_pair)
-{
-	int i;
-
-	ip_mtu_list = (struct ip_mtu_pair *)calloc(n_pair,
-						   sizeof(*ip_mtu_list));
-	if (!ip_mtu_list)
-		return 1;
-
-	for (i = 0; i < n_pair; i++) {
-		char *t0, *r0 = NULL;
-		int j = 0;
-
-		for (t0 = strtok_r(pair[i], ":", &r0); t0;
-		     t0 = strtok_r(NULL, ":", &r0)) {
-			if (!j) {
-				__u32 addr;
-				int plen;
-
-				plen = inet_net_pton(AF_INET, t0, &addr,
-						     sizeof(__u32));
-				if (plen < 0)
-					return 1;
-
-				ip_mtu_list[i].dst = addr;
-				ip_mtu_list[i].plen = plen;
-				j++;
-			} else {
-				long int mtu = strtol(t0, NULL, 10);
-
-				if (!mtu)
-					return 1;
-
-				ip_mtu_list[i].mtu = mtu;
-				break;
-			}
-		}
-	}
-
-	return 0;
-}
-
 int main(int argc, char **argv)
 {
-	bool debug = false, dummy_prog = false;
 	struct xdp_check_mtu_bpf *skel;
-	int i, opt, err = -1;
+	int opt, err = -1, mtu = -1;
 	struct bpf_program *prog;
+	bool debug = false;
 
-	while ((opt = getopt(argc, argv, "hSdD:P")) != -1) {
+	while ((opt = getopt(argc, argv, "hSdD:M")) != -1) {
 		switch (opt) {
 		case 'S':
 			flags |= XDP_FLAGS_SKB_MODE;
@@ -159,29 +104,25 @@ int main(int argc, char **argv)
 				fprintf(stderr,
 					"Failed to translate interface name: %s\n",
 					optarg);
-				return 1;
+				return -1;
 			}
 			break;
-		case 'P':
-			dummy_prog = true;
+		case 'M':
+			mtu = strtol(optarg, NULL, 10);
+			if (mtu < 0) {
+				fprintf(stderr,
+					"Failed to translate mtu: %s\n",
+					optarg);
+				return -1;
+			}
 			break;
 		default:
 			break;
 		}
 	}
-	if (argc < optind + 1) {
-		usage(basename(argv[0]));
-		return 1;
-	}
 
 	if (!(flags & XDP_FLAGS_SKB_MODE))
 		flags |= XDP_FLAGS_DRV_MODE;
-
-	if (parse_ip_mtu_pair(&argv[optind + 1], argc - 1 - optind)) {
-		fprintf(stderr, "Failed to parse IP-MTU pairs\n");
-		usage(basename(argv[0]));
-		goto out;
-	}
 
 	/* Set up libbpf errors and debug info callback */
 	libbpf_set_print(libbpf_print_fn);
@@ -195,45 +136,24 @@ int main(int argc, char **argv)
 	skel = xdp_check_mtu_bpf__open_and_load();
 	if (!skel) {
 		fprintf(stderr, "Failed to open and load BPF skeleton\n");
-		goto out;
+		return -1;
 	}
 
 	skel->bss->debug = debug;
-	prog = dummy_prog ? skel->progs.xdp_dummy : skel->progs.xdp_check_mtu;
+	skel->bss->mtu = mtu;
+	prog = mtu > 0 ? skel->progs.xdp_check_mtu : skel->progs.xdp_dummy;
 
-	if (bpf_xdp_attach(if_index, bpf_program__fd(prog),
-			   flags, NULL) < 0) {
+	if (bpf_xdp_attach(if_index, bpf_program__fd(prog), flags, NULL) < 0) {
 		fprintf(stderr, "Failed to load XDP program\n");
 		goto out_destroy;
 	}
-
-	if (!dummy_prog) {
-		for (i = 0; i < argc - 1 - optind; i++) {
-			struct lpm_key4 key = {
-				.trie_key.prefixlen = ip_mtu_list[i].plen,
-				.data[0] = ip_mtu_list[i].dst & 0xff,
-				.data[1] = (ip_mtu_list[i].dst >> 8) & 0xff,
-				.data[2] = (ip_mtu_list[i].dst >> 16) & 0xff,
-				.data[3] = (ip_mtu_list[i].dst >> 24) & 0xff,
-			};
-
-			if (bpf_map_update_elem(bpf_map__fd(skel->maps.lpm4_map),
-						&key, &ip_mtu_list[i].mtu, 0) < 0) {
-				fprintf(stderr, "Failed to update BPF map\n");
-				err = -1;
-				goto out_unlink;
-			}
-		}
-	}
+	err = 0;
 
 	while (!exiting)
 		sleep(1);
 
-out_unlink:
 	bpf_xdp_attach(if_index, -1, flags, NULL);
 out_destroy:
 	xdp_check_mtu_bpf__destroy(skel);
-out:
-	free(ip_mtu_list);
-	return err < 0 ? -err : 0;
+	return err;
 }
