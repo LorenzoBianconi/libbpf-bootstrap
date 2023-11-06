@@ -194,9 +194,9 @@ int main(int argc, char **argv)
 
 	skel->bss->debug = debug;
 
-	if (bpf_set_link_xdp_fd(if_index,
-				bpf_program__fd(skel->progs.xdp_check_mtu),
-				flags) < 0) {
+	if (bpf_xdp_attach(if_index,
+			   bpf_program__fd(skel->progs.xdp_check_mtu),
+			   flags, NULL) < 0) {
 		fprintf(stderr, "Failed to load XDP program\n");
 		goto out_destroy;
 	}
@@ -222,7 +222,7 @@ int main(int argc, char **argv)
 		sleep(1);
 
 out_unlink:
-	bpf_set_link_xdp_fd(if_index, -1, flags);
+	bpf_xdp_attach(if_index, -1, flags, NULL);
 out_destroy:
 	xdp_check_mtu_bpf__destroy(skel);
 out:
