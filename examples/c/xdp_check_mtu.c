@@ -54,7 +54,7 @@ struct ip_mtu_pair {
 static struct ip_mtu_pair *ip_mtu_list;
 
 static int flags = XDP_FLAGS_UPDATE_IF_NOEXIST;
-static int if_index, peer_index = -1;
+static int if_index;
 
 static volatile bool exiting = false;
 static void sig_handler(int sig)
@@ -137,11 +137,12 @@ static int parse_ip_mtu_pair(char **pair, int n_pair)
 
 int main(int argc, char **argv)
 {
+	bool debug = false, dummy_prog = false;
 	struct xdp_check_mtu_bpf *skel;
 	int i, opt, err = -1;
-	bool debug = false;
+	struct bpf_program *prog;
 
-	while ((opt = getopt(argc, argv, "hSdD:P:")) != -1) {
+	while ((opt = getopt(argc, argv, "hSdD:P")) != -1) {
 		switch (opt) {
 		case 'S':
 			flags |= XDP_FLAGS_SKB_MODE;
@@ -153,28 +154,22 @@ int main(int argc, char **argv)
 			debug = true;
 			break;
 		case 'D':
-			if_index = if_nametoindex(argv[0]);
+			if_index = if_nametoindex(optarg);
 			if (!if_index) {
 				fprintf(stderr,
 					"Failed to translate interface name: %s\n",
-					argv[0]);
+					optarg);
 				return 1;
 			}
 			break;
 		case 'P':
-			peer_index = if_nametoindex(argv[0]);
-			if (!peer_index) {
-				fprintf(stderr,
-					"Failed to translate interface name: %s\n",
-					argv[0]);
-				return 1;
-			}
+			dummy_prog = true;
 			break;
 		default:
 			break;
 		}
 	}
-	if (argc < optind + 2) {
+	if (argc < optind + 1) {
 		usage(basename(argv[0]));
 		return 1;
 	}
@@ -204,45 +199,36 @@ int main(int argc, char **argv)
 	}
 
 	skel->bss->debug = debug;
+	prog = dummy_prog ? skel->progs.xdp_dummy : skel->progs.xdp_check_mtu;
 
-	if (bpf_xdp_attach(if_index,
-			   bpf_program__fd(skel->progs.xdp_check_mtu),
+	if (bpf_xdp_attach(if_index, bpf_program__fd(prog),
 			   flags, NULL) < 0) {
 		fprintf(stderr, "Failed to load XDP program\n");
 		goto out_destroy;
 	}
 
-	if (peer_index >= 0 &&
-	    bpf_xdp_attach(peer_index,
-			   bpf_program__fd(skel->progs.xdp_dummy),
-			   flags, NULL) < 0) {
-		fprintf(stderr, "Failed to load XDP program\n");
-		goto out_unlink;
-	}
+	if (!dummy_prog) {
+		for (i = 0; i < argc - 1 - optind; i++) {
+			struct lpm_key4 key = {
+				.trie_key.prefixlen = ip_mtu_list[i].plen,
+				.data[0] = ip_mtu_list[i].dst & 0xff,
+				.data[1] = (ip_mtu_list[i].dst >> 8) & 0xff,
+				.data[2] = (ip_mtu_list[i].dst >> 16) & 0xff,
+				.data[3] = (ip_mtu_list[i].dst >> 24) & 0xff,
+			};
 
-	for (i = 0; i < argc - 1 - optind; i++) {
-		struct lpm_key4 key = {
-			.trie_key.prefixlen = ip_mtu_list[i].plen,
-			.data[0] = ip_mtu_list[i].dst & 0xff,
-			.data[1] = (ip_mtu_list[i].dst >> 8) & 0xff,
-			.data[2] = (ip_mtu_list[i].dst >> 16) & 0xff,
-			.data[3] = (ip_mtu_list[i].dst >> 24) & 0xff,
-		};
-
-		if (bpf_map_update_elem(bpf_map__fd(skel->maps.lpm4_map),
-					&key, &ip_mtu_list[i].mtu, 0) < 0) {
-			fprintf(stderr, "Failed to update BPF map\n");
-			err = -1;
-			goto out_unlink_peer;
+			if (bpf_map_update_elem(bpf_map__fd(skel->maps.lpm4_map),
+						&key, &ip_mtu_list[i].mtu, 0) < 0) {
+				fprintf(stderr, "Failed to update BPF map\n");
+				err = -1;
+				goto out_unlink;
+			}
 		}
 	}
 
 	while (!exiting)
 		sleep(1);
 
-out_unlink_peer:
-	if (peer_index >= 0)
-		bpf_xdp_attach(peer_index, -1, flags, NULL);
 out_unlink:
 	bpf_xdp_attach(if_index, -1, flags, NULL);
 out_destroy:
