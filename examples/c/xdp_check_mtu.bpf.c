@@ -112,7 +112,7 @@ send_icmp4_too_big(struct xdp_md *xdp, int max_packet_size)
 	return XDP_TX;
 }
 
-SEC("xdp")
+SEC("xdp.frags")
 int xdp_check_mtu(struct xdp_md *xdp)
 {
 	void *data_end = (void *)(long)xdp->data_end;
