@@ -130,10 +130,10 @@ int xdp_check_mtu(struct xdp_md *xdp)
 		if (bpf_xdp_adjust_tail(xdp, -offset))
 			return XDP_PASS;
 
+		if (debug)
+			bpf_printk("src %pI4 dst %pI4 size %d (max size %d)\n",
+				   &iph->saddr, &iph->daddr, len, size);
 		ret = send_icmp4_too_big(xdp, size);
-		if (ret == XDP_TX && debug)
-			bpf_printk("dst %pI4 size %d (max size %d)\n",
-				   &iph->daddr, len, size);
 	}
 
 	return ret;

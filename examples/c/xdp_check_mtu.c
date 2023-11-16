@@ -87,7 +87,7 @@ int main(int argc, char **argv)
 	struct bpf_program *prog;
 	bool debug = false;
 
-	while ((opt = getopt(argc, argv, "hSdD:M")) != -1) {
+	while ((opt = getopt(argc, argv, "hSdD:M:")) != -1) {
 		switch (opt) {
 		case 'S':
 			flags |= XDP_FLAGS_SKB_MODE;
